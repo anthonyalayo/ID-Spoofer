@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/NubleX/ID-Spoofer/idspoof/internal/netident"
 	"github.com/NubleX/ID-Spoofer/idspoof/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -53,13 +54,16 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	printFPRow("tcp_sack", sack, "", "")
 	printFPRow("tcp_ecn", ecn, "", "")
 
-	// iptables rules.
+	// iptables rules (current chain, with legacy fallback).
 	fmt.Println(ui.Bold("\niptables mangle rules:"))
-	iptOut := runCmd("iptables", "-t", "mangle", "-S", "IDSPOOF_WINEMU")
-	if strings.Contains(iptOut, "IDSPOOF_WINEMU") {
-		fmt.Println(ui.Green("  IDSPOOF_WINEMU chain active"))
+	iptOut := runCmd("iptables", "-t", "mangle", "-S", "IDSPOOF_NETEMU")
+	if !strings.Contains(iptOut, "IDSPOOF_NETEMU") {
+		iptOut = runCmd("iptables", "-t", "mangle", "-S", "IDSPOOF_WINEMU") // legacy v2.0.0 chain
+	}
+	if strings.Contains(iptOut, "IDSPOOF") {
+		fmt.Println(ui.Green("  ID-Spoofer mangle chain active"))
 		for _, line := range strings.Split(iptOut, "\n") {
-			if line != "" {
+			if line != "" && line != "N/A" {
 				fmt.Printf("    %s\n", line)
 			}
 		}
@@ -67,11 +71,22 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("  No ID-Spoofer iptables rules active")
 	}
 
-	// NFQUEUE status.
+	// NFQUEUE status — real liveness: pid file + process check. Rule
+	// presence alone is NOT enough: with no live dequeuer the kernel
+	// drops queued SYNs and new TCP connections time out.
 	fmt.Println(ui.Bold("\nNFQUEUE packet rewriter:"))
-	if strings.Contains(iptOut, "NFQUEUE") {
-		fmt.Println(ui.Green("  Active — rewriting IP ID + TCP options on SYN packets"))
-	} else {
+	pid, persona, alive := netident.RewriterStatus(stateM.Dir())
+	ruleActive := strings.Contains(iptOut, "NFQUEUE")
+	switch {
+	case alive:
+		fmt.Printf("  %s\n", ui.Green(fmt.Sprintf(
+			"Active — PID %d (persona: %s), rewriting IP ID + TCP options on SYN packets",
+			pid, persona)))
+	case ruleActive:
+		fmt.Println(ui.Yellow("  STALE — iptables rule present but no live rewriter process"))
+		fmt.Println("  New TCP connections will time out. Fix: idspoof apply --netident  (restart rewriter)")
+		fmt.Println("  or: idspoof restore --netident  (drop the persona)")
+	default:
 		fmt.Println("  Not active")
 	}
 

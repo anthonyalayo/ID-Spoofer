@@ -181,6 +181,13 @@ type Spoofer interface {
 	Restore(snap *Snapshot) error
 }
 
+// StateDirAware is implemented by spoofers that manage a persistent helper
+// process (the Linux NFQUEUE rewriter daemon) and must know where state
+// files live.
+type StateDirAware interface {
+	SetStateDir(dir string)
+}
+
 // Snapshot captures the original system state before Apply, so Restore
 // can revert everything precisely.
 type Snapshot struct {

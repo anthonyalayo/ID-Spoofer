@@ -8,11 +8,15 @@ import (
 )
 
 type linuxSpoofer struct {
-	rewriter *NFQueueRewriter
+	stateDir string
 }
 
 // NewLinuxSpoofer returns the Linux network persona spoofer.
 func NewLinuxSpoofer() Spoofer { return &linuxSpoofer{} }
+
+// SetStateDir implements StateDirAware: the NFQUEUE rewriter daemon is
+// tracked via a pid file in the state directory.
+func (s *linuxSpoofer) SetStateDir(dir string) { s.stateDir = dir }
 
 // Current snapshots the active system state so we can restore later.
 func (s *linuxSpoofer) Current() (*Snapshot, error) {
@@ -29,10 +33,6 @@ func (s *linuxSpoofer) Current() (*Snapshot, error) {
 func (s *linuxSpoofer) Apply(p Persona) error {
 	var errs []string
 
-	// Store the active persona type so the NFQUEUE rewriter goroutine can
-	// build the correct TCP options layout.
-	activePersona.Store(p.Type)
-
 	// 1. Sysctl — TCP/IP stack parameters (TTL, timestamps, SACK, ECN, buffers).
 	if sysctlErrs := applySysctl(&p); len(sysctlErrs) > 0 {
 		errs = append(errs, sysctlErrs...)
@@ -44,17 +44,15 @@ func (s *linuxSpoofer) Apply(p Persona) error {
 	}
 
 	// 3. NFQUEUE packet rewriter — IP ID + TCP options ordering.
-	//    Rewrites SYN packets to match the target OS:
-	//      - IP ID: 0 → incrementing (both Windows and macOS)
-	//      - TCP options: reordered to target OS layout
+	//    The kernel rule diverts outgoing SYNs to queue 42; a detached
+	//    helper process (`idspoof __rewriter`, pid tracked in the state
+	//    dir) dequeues and rewrites them, so the persona survives this
+	//    CLI process exiting.
 	if err := installNFQueueRule(); err != nil {
 		errs = append(errs, fmt.Sprintf("nfqueue rule: %v", err))
-	} else {
-		s.rewriter = NewNFQueueRewriter(nfqueueNum)
-		if err := s.rewriter.Start(); err != nil {
-			errs = append(errs, fmt.Sprintf("nfqueue rewriter: %v", err))
-			removeNFQueueRule()
-		}
+	} else if _, err := SpawnRewriterDaemon(s.stateDir, p.Type); err != nil {
+		errs = append(errs, fmt.Sprintf("nfqueue rewriter: %v", err))
+		removeNFQueueRule()
 	}
 
 	// 4. DHCP — announce persona hostname + optional vendor class.
@@ -76,10 +74,10 @@ func (s *linuxSpoofer) Apply(p Persona) error {
 func (s *linuxSpoofer) Restore(snap *Snapshot) error {
 	var errs []string
 
-	// Stop NFQUEUE rewriter first.
-	if s.rewriter != nil {
-		s.rewriter.Stop()
-		s.rewriter = nil
+	// Stop the rewriter daemon first, so the queue is cleanly unbound
+	// before the iptables rules are removed.
+	if _, err := StopRewriterDaemon(s.stateDir); err != nil {
+		errs = append(errs, fmt.Sprintf("rewriter stop: %v", err))
 	}
 
 	if sysctlErrs := restoreSysctl(snap); len(sysctlErrs) > 0 {
