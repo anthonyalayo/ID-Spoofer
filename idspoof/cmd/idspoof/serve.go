@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/NubleX/ID-Spoofer/idspoof/internal/config"
@@ -127,12 +128,21 @@ func runServe(cmd *cobra.Command, args []string) error {
 		NoDaemon:    true,
 		Quiet:       cfg.Quiet,
 	})
+
+	// Any failure: nothing usable is installed, and the deferred
+	// unwind stops the engine and restores the machine — so report
+	// which operation(s) failed before handing back to cobra.
+	var failed []string
 	for _, r := range applyResults {
 		if !r.Success {
-			// Nothing usable was installed; the deferred unwind stops the
-			// engine and restores the machine.
-			return fmt.Errorf("apply failed")
+			failed = append(failed, r.Operation)
 		}
+	}
+	if len(failed) > 0 {
+		if !cfg.Quiet {
+			printResults(applyResults)
+		}
+		return fmt.Errorf("apply failed: %s", strings.Join(failed, ", "))
 	}
 	printResults(applyResults)
 

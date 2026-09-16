@@ -40,6 +40,11 @@ func applyIPTables(p *Persona) error {
 		}
 	}
 
+	// A plain apply scopes the chain to everyone, so sweep any
+	// owner-scoped jumps a crashed `serve --owner` left behind before
+	// the global jump gate below.
+	removeOwnerScopedJumps()
+
 	// Jump from POSTROUTING to our chain (add only if not already
 	// present). Check the exact global jump, not any jump to the chain:
 	// a stale owner-scoped jump left by a crashed `serve --owner` must
@@ -83,15 +88,13 @@ func removeIPTables() error {
 	return nil
 }
 
-// ScopeToOwner narrows the mangle chain to one user's traffic: the global
-// POSTROUTING jump is replaced with a uid-owner-scoped jump, so packets
-// from every other user pass through unmodified.
-func ScopeToOwner(owner string) error {
-	// Drop the global jump (may already be gone).
-	exec.Command("iptables", "-t", "mangle", "-D", "POSTROUTING", "-j", chainName).Run()
-	// Drop owner-scoped jumps a previous crashed session left behind:
-	// only a clean restore removes them, so a restart under a different
-	// owner would otherwise keep rewriting the old owner's traffic too.
+// removeOwnerScopedJumps removes every owner-scoped jump to the chain
+// from POSTROUTING — the `-m owner --uid-owner` form that only a
+// scoped serve installs. Crashed scoped sessions leave these behind,
+// and they must not survive a plain apply (next to the global jump
+// they would double-divert the old owner's traffic into the chain)
+// or a re-scope to another owner.
+func removeOwnerScopedJumps() {
 	if out, err := exec.Command("iptables", "-t", "mangle", "-S", "POSTROUTING").Output(); err == nil {
 		for _, line := range strings.Split(string(out), "\n") {
 			fields := strings.Fields(line)
@@ -105,6 +108,18 @@ func ScopeToOwner(owner string) error {
 			exec.Command("iptables", args...).Run()
 		}
 	}
+}
+
+// ScopeToOwner narrows the mangle chain to one user's traffic: the global
+// POSTROUTING jump is replaced with a uid-owner-scoped jump, so packets
+// from every other user pass through unmodified.
+func ScopeToOwner(owner string) error {
+	// Drop the global jump (may already be gone).
+	exec.Command("iptables", "-t", "mangle", "-D", "POSTROUTING", "-j", chainName).Run()
+	// Drop owner-scoped jumps a previous crashed session left behind:
+	// a restart under a different owner would otherwise keep rewriting
+	// the old owner's traffic too.
+	removeOwnerScopedJumps()
 	// Idempotent: the scoped jump may already be in place from a previous start.
 	if err := exec.Command("iptables", "-t", "mangle", "-C", "POSTROUTING",
 		"-m", "owner", "--uid-owner", owner, "-j", chainName).Run(); err == nil {
