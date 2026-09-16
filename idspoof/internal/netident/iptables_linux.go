@@ -86,6 +86,22 @@ func removeIPTables() error {
 func ScopeToOwner(owner string) error {
 	// Drop the global jump (may already be gone).
 	exec.Command("iptables", "-t", "mangle", "-D", "POSTROUTING", "-j", chainName).Run()
+	// Drop owner-scoped jumps a previous crashed session left behind:
+	// only a clean restore removes them, so a restart under a different
+	// owner would otherwise keep rewriting the old owner's traffic too.
+	if out, err := exec.Command("iptables", "-t", "mangle", "-S", "POSTROUTING").Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 4 || fields[0] != "-A" || fields[1] != "POSTROUTING" {
+				continue
+			}
+			if !strings.Contains(line, chainName) || !strings.Contains(line, "-m owner") {
+				continue
+			}
+			args := append([]string{"-t", "mangle", "-D", "POSTROUTING"}, fields[2:]...)
+			exec.Command("iptables", args...).Run()
+		}
+	}
 	// Idempotent: the scoped jump may already be in place from a previous start.
 	if err := exec.Command("iptables", "-t", "mangle", "-C", "POSTROUTING",
 		"-m", "owner", "--uid-owner", owner, "-j", chainName).Run(); err == nil {

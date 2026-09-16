@@ -76,7 +76,7 @@ When you run `idspoof apply`, five layers activate simultaneously:
 |-------|-------------|--------|
 | **sysctl** | TTL, tcp_timestamps, tcp_sack, tcp_ecn, window buffers | Kernel-level TCP/IP parameters matching the selected OS |
 | **iptables** | `IDSPOOF_NETEMU` mangle chain | Forces correct TTL on outgoing packets, clamps MSS=1460 on SYN |
-| **NFQUEUE** (queue 42) | Intercepts outgoing SYN packets via a detached helper process | Rewrites IP ID (Linux=0 → incrementing) and reorders TCP options to match OS layout. The helper (`idspoof __rewriter`, PID in `rewriter.pid` in the state dir) outlives the CLI, so the persona persists after `apply` exits; `restore` stops it |
+| **NFQUEUE** (queue 42) | Intercepts outgoing SYN packets via a detached helper process | Rewrites IP ID (Linux=0 → incrementing) and reorders TCP options to match OS layout. The helper (`idspoof __rewriter`, PID in `rewriter.pid` in the state dir) outlives the CLI, so the persona persists after `apply` exits; `restore` stops it. `idspoof serve` runs the same rewriter in the foreground — it lives while the command runs and is stopped on SIGTERM/SIGINT |
 | **DHCP** | Option 12 (hostname) + Option 60 (vendor class, Windows only) | Router sees appropriate hostname (e.g., `DESKTOP-A1B2C3D` or `Admins-MacBook-Pro`) |
 | **mDNS** | Stops Avahi (Windows) or leaves it running (macOS/iOS) | Controls hostname visibility on local network |
 
@@ -195,6 +195,14 @@ sudo idspoof restore --mac
 # Roll back only network persona
 sudo idspoof restore --netident
 
+# Foreground managed mode: apply the persona, keep it alive while you
+# test, and roll everything back on stop (SIGTERM/SIGINT) — intended
+# for systemd units or a supervised session
+sudo idspoof serve --persona macos --netident
+
+# Scope the mangle chain to one user's traffic (Linux)
+sudo idspoof serve --persona macos --netident --owner obscura
+
 # Interactive TUI menu
 sudo idspoof menu
 
@@ -235,14 +243,14 @@ sudo tcpdump -i any -nn 'tcp[tcpflags] & tcp-syn != 0' -X
 
 ## State management
 
-State is stored in `/var/log/idspoof/state.env` — an atomic key=value file backward-compatible with the v1 Bash format. Keys include `ORIG_MACS`, `ORIG_TTL`, `ORIG_TCP_TIMESTAMPS`, and related sysctl originals. `restore` uses these to fully roll back. The sysctl baseline (`ORIG_TTL` & co.) is captured on the **first** apply only — re-applying without a restore in between keeps the saved baseline instead of recording the persona's own values as the "originals" — and is cleared again on a successful `restore`, so each apply cycle starts from a fresh capture. The NFQUEUE rewriter additionally writes `rewriter.pid` (live PID + persona) and `rewriter.log` (helper output/kernel errors, fresh per daemon) into the same directory. `idspoof status` reports the rewriter's real liveness (PID + process check); if the iptables rule is present but no process is draining queue 42, `status` flags it as STALE — that is the "new TCP connections time out" state, and `apply --netident` or `restore --netident` clears it.
+State is stored in `/var/log/idspoof/state.env` — an atomic key=value file backward-compatible with the v1 Bash format. Keys include `ORIG_MACS`, `ORIG_TTL`, `ORIG_TCP_TIMESTAMPS`, and related sysctl originals. `restore` uses these to fully roll back. The sysctl baseline (`ORIG_TTL` & co.) is captured on the **first** apply only — re-applying without a restore in between keeps the saved baseline instead of recording the persona's own values as the "originals" — and is cleared again on a successful `restore`, so each apply cycle starts from a fresh capture. The NFQUEUE rewriter additionally writes `rewriter.pid` (live PID + persona) and `rewriter.log` (helper output/kernel errors, fresh per daemon) into the same directory. In `serve` mode the rewriter runs in the foreground process instead of the detached helper: `rewriter.pid` is still written (marker `serve`) and the engine stops on SIGTERM/SIGINT, but no `rewriter.log` is produced. `idspoof status` reports the rewriter's real liveness (PID + process check); if the iptables rule is present but no process is draining queue 42, `status` flags it as STALE — that is the "new TCP connections time out" state, and `apply --netident` or `restore --netident` clears it.
 
 ## Architecture
 
 The Go rewrite (`idspoof/`) replaces the original Bash scripts with a structured, cross-platform binary:
 
 ```
-cmd/idspoof/          CLI commands (cobra): apply, restore, status, menu, version
+cmd/idspoof/          CLI commands (cobra): apply, serve, restore, status, menu, version
 internal/
   mac/                MAC generation and Linux interface manipulation
   netident/           Multi-OS network persona: sysctl, iptables, NFQUEUE, DHCP, mDNS

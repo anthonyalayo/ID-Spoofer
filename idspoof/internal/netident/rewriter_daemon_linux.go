@@ -289,11 +289,14 @@ func PrepareRewriterDaemon(persona PersonaType, stateDir string, marker string) 
 
 // FinishRewriterDaemon stops the engine and removes the pid file. The
 // caller owns the blocking step (a signal wait or the process's own
-// lifetime). A nil engine is a no-op.
+// lifetime). A nil engine is a true no-op — it means this process does
+// not own the queue, so a live pid file from someone else (say, the
+// detached helper spawned by an earlier apply) must be left intact.
 func FinishRewriterDaemon(r *NFQueueRewriter, stateDir string) {
-	if r != nil {
-		r.Stop()
+	if r == nil {
+		return
 	}
+	r.Stop()
 	os.Remove(filepath.Join(stateDir, rewriterPidFileName))
 }
 
