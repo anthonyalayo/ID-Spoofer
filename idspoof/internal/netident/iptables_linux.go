@@ -40,8 +40,11 @@ func applyIPTables(p *Persona) error {
 		}
 	}
 
-	// Jump from POSTROUTING to our chain (add only if not already present).
-	if !jumpExists() {
+	// Jump from POSTROUTING to our chain (add only if not already
+	// present). Check the exact global jump, not any jump to the chain:
+	// a stale owner-scoped jump left by a crashed `serve --owner` must
+	// not make a plain apply inherit the old single-user scoping.
+	if exec.Command("iptables", "-t", "mangle", "-C", "POSTROUTING", "-j", chainName).Run() != nil {
 		if err := run("iptables", "-t", "mangle", "-A", "POSTROUTING", "-j", chainName); err != nil {
 			return fmt.Errorf("adding jump: %w", err)
 		}

@@ -66,6 +66,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// flags all three run; passing any restricts to those selected.
 	runMAC, runNetIdent, runSysInfo := selectOps(serveOpts.mac, serveOpts.netident, serveOpts.sysinfo)
 
+	// Watch for the stop signal from the very start of the lifecycle:
+	// with the handler registered, a SIGTERM/SIGINT arriving during
+	// prepare/apply no longer kills the process by default disposition
+	// — the current phase finishes, and the deferred unwind below
+	// restores the machine either way.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
+
 	// This process runs the rewriter itself, so no helper is spawned.
 	// Every exit path — clean stop, error, or a crash followed by a
 	// supervisor restart (re-apply is idempotent) — stops the engine and
@@ -147,10 +155,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 		fmt.Printf("rewriter running as PID %d — SIGTERM or Ctrl-C stops it and restores the system\n", os.Getpid())
 	}
 
-	// Wait for the supervisor's stop signal (systemctl stop, Ctrl-C);
-	// the deferred unwind above restores the machine on every exit path.
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
+	// Block until the stop signal arrives; the deferred unwind restores
+	// the machine on exit.
 	sig := <-sigs
 	if !cfg.Quiet {
 		fmt.Printf("received %s; restoring\n", sig)
