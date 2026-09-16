@@ -88,7 +88,7 @@ func ScopeToOwner(owner string) error {
 	exec.Command("iptables", "-t", "mangle", "-D", "POSTROUTING", "-j", chainName).Run()
 	// Idempotent: the scoped jump may already be in place from a previous start.
 	if err := exec.Command("iptables", "-t", "mangle", "-C", "POSTROUTING",
-		"-m", "owner", "--uid-owner", owner, "-j", chainName).Err; err == nil {
+		"-m", "owner", "--uid-owner", owner, "-j", chainName).Run(); err == nil {
 		return nil
 	}
 	// iptables resolves the user name to a UID at install time; a missing

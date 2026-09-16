@@ -82,11 +82,11 @@ func readRewriterInfo(pidFile string) (rewriterInfo, bool) {
 // process owned by the subcommand named by cmd ("__rewriter" or
 // "serve"). The /proc/<pid>/cmdline check guards against PID reuse: a
 // stale pid file pointing at an unrelated process that recycled the
-// PID must not be treated (or signalled) as ours. The appended NUL
-// makes a marker that is the final argv entry match too; requiring a
-// full NUL-delimited argv entry (not a bare substring) keeps that
-// guard — a recycled process would have to carry cmd as an exact argv
-// element.
+// PID must not be treated (or signalled) as ours. Both NUL boundaries
+// matter: the appended NUL makes a marker that is the final argv entry
+// match too, and the trailing one stops a marker-prefixed element (a
+// recycled PID running, say, "serve-proxy") from matching; a recycled
+// process would have to carry cmd as an exact argv element.
 func rewriterProcAlive(pid int, cmd string) bool {
 	if pid <= 1 {
 		return false
@@ -99,7 +99,7 @@ func rewriterProcAlive(pid int, cmd string) bool {
 		return false
 	}
 	cmdline := string(append(data, 0)) // NUL-terminated argv
-	return strings.Contains(cmdline, "\x00"+cmd)
+	return strings.Contains(cmdline, "\x00"+cmd+"\x00")
 }
 
 // RewriterStatus reports the rewriter daemon's state for status displays.
@@ -269,11 +269,20 @@ func PrepareRewriterDaemon(persona PersonaType, stateDir string, marker string) 
 		return nil, fmt.Errorf("binding NFQUEUE %d: %w", nfqueueNum, err)
 	}
 
-	// Advertise liveness so apply/restore/status can find us.
-	if err := os.WriteFile(pidFile,
-		[]byte(fmt.Sprintf("%d\t%s\t%s\n", os.Getpid(), persona, marker)), 0o644); err != nil {
+	// Advertise liveness so apply/restore/status can find us. Atomic
+	// publish (temp file + rename): readers only ever see a complete
+	// file, so a crash mid-write cannot leave a torn pid file that
+	// parses back as a legacy two-field entry and mislabels this
+	// daemon.
+	tmp := fmt.Sprintf("%s.%d", pidFile, os.Getpid())
+	if err := os.WriteFile(tmp, []byte(fmt.Sprintf("%d\t%s\t%s\n", os.Getpid(), persona, marker)), 0o644); err != nil {
 		r.Stop()
 		return nil, fmt.Errorf("writing pid file: %w", err)
+	}
+	if err := os.Rename(tmp, pidFile); err != nil {
+		os.Remove(tmp)
+		r.Stop()
+		return nil, fmt.Errorf("publishing pid file: %w", err)
 	}
 	return r, nil
 }

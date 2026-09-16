@@ -31,7 +31,10 @@ var serveCmd = &cobra.Command{
 
 Run it under a supervisor: after a crash or SIGKILL the supervisor
 restarts it and the re-apply is idempotent; a clean stop leaves the
-machine in its original state.`,
+machine in its original state.
+
+The NFQUEUE rewriter is Linux-only; on other platforms the --netident
+part is unavailable, but --mac and --sysinfo still work.`,
 	RunE: runServe,
 }
 
@@ -59,35 +62,55 @@ func runServe(cmd *cobra.Command, args []string) error {
 		stateDir = config.DefaultStateDir
 	}
 
-	// Take over the queue: stop whatever a previous session left running
-	// (a detached helper from a manual `apply`, or an older serve that
-	// died without restoring). This process becomes the sole owner.
-	if pid, err := netident.StopRewriterDaemon(stateDir); err == nil && pid > 0 {
-		if !cfg.Quiet {
-			fmt.Printf("stopped previous rewriter (PID %d)\n", pid)
-		}
-	}
-
 	// Operation selection, same convention as apply: with no operation
 	// flags all three run; passing any restricts to those selected.
 	runMAC, runNetIdent, runSysInfo := selectOps(serveOpts.mac, serveOpts.netident, serveOpts.sysinfo)
 
-	// Start the rewriter engine BEFORE applying the stack: the apply
-	// below (NoDaemon) then sees a live rewriter for the matching
-	// persona and stays quiet instead of warning that the queue has
-	// no dequeuer yet. Binding before the iptables NFQUEUE rule exists
-	// is safe — nothing is diverted to the queue until the rule lands.
+	// This process runs the rewriter itself, so no helper is spawned.
+	// Every exit path — clean stop, error, or a crash followed by a
+	// supervisor restart (re-apply is idempotent) — stops the engine and
+	// restores the machine; no half-applied state is ever left behind.
 	var rw *netident.NFQueueRewriter
+	defer func() {
+		netident.FinishRewriterDaemon(rw, stateDir)
+		if !cfg.Quiet {
+			fmt.Println("restoring original state...")
+		}
+		results := orch.Restore(spoofer.Options{MAC: runMAC, NetIdent: runNetIdent, SysInfo: runSysInfo, Quiet: cfg.Quiet})
+		printResults(results)
+		if !cfg.Quiet {
+			fmt.Println("restored; system state clean")
+		}
+	}()
+
+	// Only this process may own queue 42, so take over first — but only
+	// when this serve runs the netident op: stopping a drainer a
+	// previous session left running while a non-netident op set (say,
+	// serve --mac) neither rebinds nor restores the queue would leave
+	// that session's NFQUEUE rule with nobody draining it.
 	if runNetIdent {
+		if pid, err := netident.StopRewriterDaemon(stateDir); err == nil && pid > 0 {
+			if !cfg.Quiet {
+				fmt.Printf("stopped previous rewriter (PID %d)\n", pid)
+			}
+		}
+
+		// Start the rewriter engine BEFORE applying the stack: the apply
+		// below (NoDaemon) then sees a live rewriter for the matching
+		// persona and stays quiet instead of warning that the queue has
+		// no dequeuer yet. Binding before the iptables NFQUEUE rule exists
+		// is safe — nothing is diverted to the queue until the rule lands.
 		var err error
 		rw, err = netident.PrepareRewriterDaemon(pt, stateDir, "serve")
 		if err != nil {
+			// The deferred unwind restores the machine, including any
+			// NFQUEUE rule a previous session left installed.
 			return fmt.Errorf("rewriter: %w", err)
 		}
 	}
 
-	// Install the selected stack without forking: this process runs the
-	// rewriter itself, so no helper is spawned.
+	// Install the selected stack: the rewriter engine is already bound,
+	// so this process owns the queue and no helper is spawned.
 	applyResults := orch.Apply(spoofer.Options{
 		MAC:         runMAC,
 		NetIdent:    runNetIdent,
@@ -98,10 +121,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	})
 	for _, r := range applyResults {
 		if !r.Success {
-			// Nothing usable was installed; unwind what we touched.
-			netident.FinishRewriterDaemon(rw, stateDir)
-			orch.Restore(spoofer.Options{MAC: runMAC, NetIdent: runNetIdent, SysInfo: runSysInfo, Quiet: true})
-			return fmt.Errorf("apply failed; system state restored")
+			// Nothing usable was installed; the deferred unwind stops the
+			// engine and restores the machine.
+			return fmt.Errorf("apply failed")
 		}
 	}
 	printResults(applyResults)
@@ -109,9 +131,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Optionally narrow the mangle chain to one user's traffic.
 	if serveOpts.owner != "" && runNetIdent {
 		if err := netident.ScopeToOwner(serveOpts.owner); err != nil {
-			netident.FinishRewriterDaemon(rw, stateDir)
-			orch.Restore(spoofer.Options{MAC: runMAC, NetIdent: runNetIdent, SysInfo: runSysInfo, Quiet: true})
-			return fmt.Errorf("scoping to owner %q: %v; system state restored", serveOpts.owner, err)
+			// The deferred unwind stops the engine and restores the stack.
+			return fmt.Errorf("scoping to owner %q: %w", serveOpts.owner, err)
 		}
 		if !cfg.Quiet {
 			fmt.Printf("mangle chain scoped to user %q\n", serveOpts.owner)
@@ -127,7 +148,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	// Wait for the supervisor's stop signal (systemctl stop, Ctrl-C);
-	// every exit path restores the machine below.
+	// the deferred unwind above restores the machine on every exit path.
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	sig := <-sigs
@@ -135,15 +156,5 @@ func runServe(cmd *cobra.Command, args []string) error {
 		fmt.Printf("received %s; restoring\n", sig)
 	}
 
-	if rw != nil {
-		netident.FinishRewriterDaemon(rw, stateDir)
-	}
-
-	// Every exit path restores the machine.
-	restoreResults := orch.Restore(spoofer.Options{MAC: runMAC, NetIdent: runNetIdent, SysInfo: runSysInfo, Quiet: cfg.Quiet})
-	printResults(restoreResults)
-	if !cfg.Quiet {
-		fmt.Println("restored; system state clean")
-	}
 	return nil
 }

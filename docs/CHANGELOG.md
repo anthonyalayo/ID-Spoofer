@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Persistent NFQUEUE rewriter** — `apply --netident` now spawns a detached helper process (`idspoof __rewriter`, its own session, PID tracked in `rewriter.pid` in the state dir) that outlives the CLI. Re-applying with the same persona reuses the running daemon; a different persona replaces it. `restore --netident` stops it.
 - `idspoof status` (and the TUI Status tab) now report real rewriter liveness (pid file + process check) and flag the **STALE** state: iptables rule present but no live rewriter — the condition where queued SYNs get dropped and new TCP connections time out.
+- **`idspoof serve`** — new foreground "managed" mode: applies the selected operations (all three by default, like `apply`; individual flags to narrow, e.g. `--netident` for persona + rewriter only), runs the NFQUEUE rewriter in-process, and restores everything on SIGTERM/SIGINT. `--owner <user>` scopes the mangle chain to one user's traffic (an `iptables -m owner` jump, removed on restore). Meant to run under systemd: a crash or SIGKILL is safe (the supervisor restarts it and re-apply is idempotent), and a clean stop leaves the machine in its original state.
 
 ### Fixed
 
@@ -22,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - the socket bound without joining the queue multicast group `1<<NFNL_SUBSYS_QUEUE`
 - `idspoof status` reported "NFQUEUE rewriter: Active" from the presence of the iptables rule alone, and dumped the legacy `IDSPOOF_WINEMU` chain instead of `IDSPOOF_NETEMU`
 - **`restore --netident` left the system fingerprinted** — every `apply` re-captured the *current* live sysctls and overwrote the saved `ORIG_*` originals. Re-applying without a restore in between therefore recorded the persona's own values (TTL=128, timestamps=0, …) as the "originals", so a later `restore` "restored" to those values and the host stayed fingerprinted. The baseline is now captured on the first apply only and cleared on a successful `restore`, so each cycle re-captures a clean original. Also, `net.ipv4.tcp_rfc1337` was written on apply/restore but never saved, so `restore` forced it to 0 even when the host default was 1.
+- The `[spoofed]` MAC markers in `status` now key off the values recorded as spoofed (`SPOOFED_MACS`) instead of comparing against the `ORIG_MACS` baseline, so a docker bridge that rotated its own MAC can no longer masquerade as active spoofing; the marker is cleared on restore. The MAC baseline is also captured on the first apply only (the same first-apply-only rule the netident sysctl baselines got), so re-applying can no longer re-baseline rotated live values.
 
 ---
 
