@@ -68,6 +68,7 @@ func init() {
 
 	rootCmd.AddCommand(applyCmd)
 	rootCmd.AddCommand(restoreCmd)
+	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(scanCmd)
 	rootCmd.AddCommand(menuCmd)

@@ -169,6 +169,24 @@ func AndroidPersona(hostname string) Persona {
 	}
 }
 
+// PersonaForType returns the target profile for a persona type, with an
+// empty hostname (the DHCP hostname is filled in at apply time).
+func PersonaForType(t PersonaType) Persona {
+	switch t {
+	case PersonaWindows:
+		return WindowsPersona("")
+	case PersonaMacOS:
+		return MacOSPersona("")
+	case PersonaiOS:
+		return IOSPersona("")
+	case PersonaLinux:
+		return LinuxPersona("")
+	case PersonaAndroid:
+		return AndroidPersona("")
+	}
+	return Persona{Type: t}
+}
+
 // Spoofer applies and restores a network persona.
 type Spoofer interface {
 	// Current reads the active sysctl/iptables/DHCP state.
@@ -186,6 +204,15 @@ type Spoofer interface {
 // files live.
 type StateDirAware interface {
 	SetStateDir(dir string)
+}
+
+// RewriterSpawnControl is an optional capability of spoofers that manage
+// the NFQUEUE rewriter helper as part of Apply. Callers that run the
+// rewriter under an external process manager (a systemd service executing
+// `idspoof __rewriter`) use it to keep the NFQUEUE rule installed without
+// spawning the detached helper.
+type RewriterSpawnControl interface {
+	SetNoDaemon(bool)
 }
 
 // Snapshot captures the original system state before Apply, so Restore

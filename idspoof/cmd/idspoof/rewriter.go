@@ -29,7 +29,7 @@ func init() {
 }
 
 func runRewriter(cmd *cobra.Command, args []string) error {
-	if err := netident.RunRewriterDaemon(parsePersonaType(rewriterOpts.persona), rewriterOpts.stateDir); err != nil {
+	if err := netident.RunRewriterDaemon(parsePersonaType(rewriterOpts.persona), rewriterOpts.stateDir, "__rewriter"); err != nil {
 		return fmt.Errorf("rewriter: %w", err)
 	}
 	fmt.Println("rewriter stopped")

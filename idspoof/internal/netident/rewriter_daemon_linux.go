@@ -13,7 +13,6 @@
 package netident
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,7 +26,7 @@ import (
 
 const (
 	// rewriterPidFileName is the pid file written by the helper process.
-	// Format: "<pid>\t<persona>\n"
+	// Format: "<pid>\t<persona>\t<cmd>\n"
 	rewriterPidFileName = "rewriter.pid"
 
 	// rewriterLogFileName captures the helper's stdout/stderr for debugging.
@@ -45,6 +44,10 @@ const (
 type rewriterInfo struct {
 	PID     int
 	Persona PersonaType
+	// Cmd records which subcommand owns the pid file ("__rewriter":
+	// the detached helper, "serve": foreground managed mode). Legacy
+	// two-field pid files default to the helper.
+	Cmd string
 }
 
 // readRewriterInfo parses the pid file. Returns (_, false) when the file is
@@ -66,14 +69,25 @@ func readRewriterInfo(pidFile string) (rewriterInfo, bool) {
 	if len(fields) > 1 {
 		info.Persona = PersonaType(fields[1])
 	}
+	if len(fields) > 2 {
+		info.Cmd = fields[2]
+	}
+	if info.Cmd == "" {
+		info.Cmd = "__rewriter"
+	}
 	return info, true
 }
 
-// rewriterProcAlive reports whether pid points at a live rewriter process.
-// The /proc/<pid>/cmdline check guards against PID reuse: a stale pid file
-// pointing at an unrelated process that recycled the PID must not be
-// treated (or signalled) as ours.
-func rewriterProcAlive(pid int) bool {
+// rewriterProcAlive reports whether pid points at a live rewriter
+// process owned by the subcommand named by cmd ("__rewriter" or
+// "serve"). The /proc/<pid>/cmdline check guards against PID reuse: a
+// stale pid file pointing at an unrelated process that recycled the
+// PID must not be treated (or signalled) as ours. The appended NUL
+// makes a marker that is the final argv entry match too; requiring a
+// full NUL-delimited argv entry (not a bare substring) keeps that
+// guard — a recycled process would have to carry cmd as an exact argv
+// element.
+func rewriterProcAlive(pid int, cmd string) bool {
 	if pid <= 1 {
 		return false
 	}
@@ -84,7 +98,8 @@ func rewriterProcAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(bytes.ReplaceAll(data, []byte{0}, []byte{0x20})), "__rewriter")
+	cmdline := string(append(data, 0)) // NUL-terminated argv
+	return strings.Contains(cmdline, "\x00"+cmd)
 }
 
 // RewriterStatus reports the rewriter daemon's state for status displays.
@@ -96,7 +111,7 @@ func RewriterStatus(stateDir string) (pid int, persona string, alive bool) {
 	if !ok {
 		return 0, "", false
 	}
-	alive = rewriterProcAlive(info.PID)
+	alive = rewriterProcAlive(info.PID, info.Cmd)
 	return info.PID, string(info.Persona), alive
 }
 
@@ -117,10 +132,10 @@ func SpawnRewriterDaemon(stateDir string, persona PersonaType) (int, error) {
 	// Handle any existing daemon first.
 	if info, ok := readRewriterInfo(pidFile); ok {
 		switch {
-		case rewriterProcAlive(info.PID) && info.Persona == persona:
+		case rewriterProcAlive(info.PID, info.Cmd) && info.Persona == persona:
 			return info.PID, nil // already running for this persona.
-		case rewriterProcAlive(info.PID):
-			if err := killRewriterProcess(info.PID); err != nil {
+		case rewriterProcAlive(info.PID, info.Cmd):
+			if err := killRewriterProcess(info.PID, info.Cmd); err != nil {
 				return 0, fmt.Errorf("stopping previous rewriter (PID %d): %w", info.PID, err)
 			}
 			os.Remove(pidFile)
@@ -162,7 +177,7 @@ func SpawnRewriterDaemon(stateDir string, persona PersonaType) (int, error) {
 	startWait := time.Now()
 	for {
 		if info, ok := readRewriterInfo(pidFile); ok &&
-			info.PID == cmd.Process.Pid && rewriterProcAlive(info.PID) {
+			info.PID == cmd.Process.Pid && rewriterProcAlive(info.PID, info.Cmd) {
 			logFile.Close()
 			return info.PID, nil
 		}
@@ -197,11 +212,11 @@ func StopRewriterDaemon(stateDir string) (int, error) {
 	}
 	pidFile := filepath.Join(stateDir, rewriterPidFileName)
 	info, ok := readRewriterInfo(pidFile)
-	if !ok || !rewriterProcAlive(info.PID) {
+	if !ok || !rewriterProcAlive(info.PID, info.Cmd) {
 		os.Remove(pidFile) // stale file, if any.
 		return 0, nil
 	}
-	if err := killRewriterProcess(info.PID); err != nil {
+	if err := killRewriterProcess(info.PID, info.Cmd); err != nil {
 		return info.PID, fmt.Errorf("stopping rewriter (PID %d): %w", info.PID, err)
 	}
 	os.Remove(pidFile)
@@ -209,60 +224,86 @@ func StopRewriterDaemon(stateDir string) (int, error) {
 }
 
 // killRewriterProcess sends SIGTERM and escalates to SIGKILL after a
-// grace period.
-func killRewriterProcess(pid int) error {
+// grace period. cmd is the owning subcommand marker, re-verified at
+// every poll so a recycled PID is never signalled as ours.
+func killRewriterProcess(pid int, cmd string) error {
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(rewriterStopTimeout)
-	for rewriterProcAlive(pid) && time.Now().Before(deadline) {
+	for rewriterProcAlive(pid, cmd) && time.Now().Before(deadline) {
 		time.Sleep(50 * time.Millisecond)
 	}
-	if rewriterProcAlive(pid) {
+	if rewriterProcAlive(pid, cmd) {
 		return syscall.Kill(pid, syscall.SIGKILL)
 	}
 	return nil
 }
 
-// RunRewriterDaemon runs the NFQUEUE rewriter in the foreground until
-// SIGTERM/SIGINT. Entry point of the hidden `idspoof __rewriter`
-// subcommand; it is spawned detached by apply and outlives the CLI.
-func RunRewriterDaemon(persona PersonaType, stateDir string) error {
+// PrepareRewriterDaemon binds the NFQUEUE, seeds the persona, and
+// advertises liveness (pid file) so status/apply/restore can find the
+// engine. It does NOT block on signals, so a caller that must do other
+// work between starting and stopping the engine (e.g. `idspoof serve`
+// applying the stack first) can.
+func PrepareRewriterDaemon(persona PersonaType, stateDir string, marker string) (*NFQueueRewriter, error) {
 	if stateDir == "" {
-		return fmt.Errorf("state directory not configured")
+		return nil, fmt.Errorf("state directory not configured")
 	}
 	pidFile := filepath.Join(stateDir, rewriterPidFileName)
 
 	// Refuse to double-bind the queue if another live daemon owns it.
-	if info, ok := readRewriterInfo(pidFile); ok && rewriterProcAlive(info.PID) {
-		return fmt.Errorf("rewriter already running (PID %d, persona %s)", info.PID, info.Persona)
+	if info, ok := readRewriterInfo(pidFile); ok && rewriterProcAlive(info.PID, info.Cmd) {
+		return nil, fmt.Errorf("rewriter already running (PID %d, persona %s)", info.PID, info.Persona)
 	}
 
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
-		return fmt.Errorf("creating state dir: %w", err)
+		return nil, fmt.Errorf("creating state dir: %w", err)
 	}
 
-	// The helper process has no knowledge of the CLI's in-memory state —
-	// seed the persona before the rewriter goroutine reads it.
+	// The owning process has no knowledge of the CLI's in-memory state
+	// — seed the persona before the rewriter goroutine reads it.
 	activePersona.Store(persona)
 
 	r := NewNFQueueRewriter(nfqueueNum)
 	if err := r.Start(); err != nil {
-		return fmt.Errorf("binding NFQUEUE %d: %w", nfqueueNum, err)
+		return nil, fmt.Errorf("binding NFQUEUE %d: %w", nfqueueNum, err)
 	}
 
 	// Advertise liveness so apply/restore/status can find us.
 	if err := os.WriteFile(pidFile,
-		[]byte(fmt.Sprintf("%d\t%s\n", os.Getpid(), persona)), 0o644); err != nil {
+		[]byte(fmt.Sprintf("%d\t%s\t%s\n", os.Getpid(), persona, marker)), 0o644); err != nil {
 		r.Stop()
-		return fmt.Errorf("writing pid file: %w", err)
+		return nil, fmt.Errorf("writing pid file: %w", err)
+	}
+	return r, nil
+}
+
+// FinishRewriterDaemon stops the engine and removes the pid file. The
+// caller owns the blocking step (a signal wait or the process's own
+// lifetime). A nil engine is a no-op.
+func FinishRewriterDaemon(r *NFQueueRewriter, stateDir string) {
+	if r != nil {
+		r.Stop()
+	}
+	os.Remove(filepath.Join(stateDir, rewriterPidFileName))
+}
+
+// RunRewriterDaemon runs the NFQUEUE rewriter in the foreground until
+// SIGTERM/SIGINT. Entry point of the hidden `idspoof __rewriter`
+// subcommand (spawned detached by apply, outlives the CLI): it prepares
+// the engine, blocks on a stop signal, then finishes. marker records
+// which owning subcommand wrote the pid file, so liveness checks match
+// the right argv entry.
+func RunRewriterDaemon(persona PersonaType, stateDir string, marker string) error {
+	r, err := PrepareRewriterDaemon(persona, stateDir, marker)
+	if err != nil {
+		return err
 	}
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	<-sigs
 
-	r.Stop()
-	os.Remove(pidFile)
+	FinishRewriterDaemon(r, stateDir)
 	return nil
 }

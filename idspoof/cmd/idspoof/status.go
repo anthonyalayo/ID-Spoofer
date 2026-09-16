@@ -27,11 +27,16 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	ifaces := currentMACMap()
 	origMACs, _ := stateM.Get("ORIG_MACS")
 	origMap := parseMACState(origMACs)
+	spoofedMACs, _ := stateM.Get("SPOOFED_MACS")
+	spoofedMap := parseMACState(spoofedMACs)
 
 	for name, mac := range ifaces {
 		orig := origMap[name]
 		changed := ""
-		if orig != "" && !strings.EqualFold(orig, mac) {
+		// A live MAC is marked only when it equals a value we recorded
+		// as spoofed: a stale ORIG_MACS baseline (rotated bridges, a
+		// re-randomized docker) must not read as active spoofing.
+		if sp := spoofedMap[name]; sp != "" && strings.EqualFold(sp, mac) {
 			changed = ui.Yellow("  [spoofed]")
 		}
 		fmt.Printf("  %-12s  current: %-20s  original: %s%s\n", name, mac, orig, changed)
@@ -48,8 +53,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	origTTL, _ := stateM.Get("ORIG_TTL")
 	origTS, _ := stateM.Get("ORIG_TCP_TIMESTAMPS")
 
-	printFPRow("TTL", ttl, origTTL, "128=Windows, 64=Linux")
-	printFPRow("tcp_timestamps", ts, origTS, "0=Windows, 1=Linux")
+	// The MacOS legend entry comes from the persona definition, so it
+	// stays in sync with what apply actually writes.
+	fpMac := netident.PersonaForType(netident.PersonaMacOS)
+	printFPRow("TTL", ttl, origTTL, fmt.Sprintf("128=Windows, 64=Linux, %d=MacOS", fpMac.TTL))
+	printFPRow("tcp_timestamps", ts, origTS, fmt.Sprintf("0=Windows, 1=Linux, %d=MacOS", fpMac.TCPTimestamps))
 	printFPRow("tcp_window_scaling", ws, "", "")
 	printFPRow("tcp_sack", sack, "", "")
 	printFPRow("tcp_ecn", ecn, "", "")
@@ -84,7 +92,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			pid, persona)))
 	case ruleActive:
 		fmt.Println(ui.Yellow("  STALE — iptables rule present but no live rewriter process"))
-		fmt.Println("  New TCP connections will time out. Fix: idspoof apply --netident  (restart rewriter)")
+		fmt.Println("  New TCP connections will time out. Fix: systemctl restart the idspoof service, or: idspoof apply --netident (restart rewriter)")
 		fmt.Println("  or: idspoof restore --netident  (drop the persona)")
 	default:
 		fmt.Println("  Not active")

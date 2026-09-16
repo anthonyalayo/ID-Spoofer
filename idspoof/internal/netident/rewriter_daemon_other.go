@@ -24,6 +24,23 @@ func RewriterStatus(stateDir string) (int, string, bool) {
 }
 
 // RunRewriterDaemon is unsupported outside Linux.
-func RunRewriterDaemon(persona PersonaType, stateDir string) error {
+func RunRewriterDaemon(persona PersonaType, stateDir string, marker string) error {
 	return fmt.Errorf("NFQUEUE rewriter not supported on this platform")
 }
+
+// ScopeToOwner is unsupported outside Linux.
+func ScopeToOwner(owner string) error {
+	return fmt.Errorf("mangle owner scoping not supported on this platform")
+}
+
+// NFQueueRewriter is the Linux NFQUEUE engine; off-Linux the type exists
+// only so the shared serve command compiles.
+type NFQueueRewriter struct{}
+
+// PrepareRewriterDaemon is unsupported outside Linux.
+func PrepareRewriterDaemon(persona PersonaType, stateDir string, marker string) (*NFQueueRewriter, error) {
+	return nil, fmt.Errorf("NFQUEUE rewriter not supported on this platform")
+}
+
+// FinishRewriterDaemon is a no-op outside Linux.
+func FinishRewriterDaemon(r *NFQueueRewriter, stateDir string) {}

@@ -52,8 +52,21 @@ func applyIPTables(p *Persona) error {
 
 // removeIPTables cleans up all iptables rules added by applyIPTables.
 func removeIPTables() error {
-	// Remove the jump from POSTROUTING.
-	exec.Command("iptables", "-t", "mangle", "-D", "POSTROUTING", "-j", chainName).Run()
+	// Remove every jump into our chain from POSTROUTING — the plain global
+	// jump as well as any owner-scoped jump added by `serve --owner`.
+	if out, err := exec.Command("iptables", "-t", "mangle", "-S", "POSTROUTING").Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 4 || fields[0] != "-A" || fields[1] != "POSTROUTING" {
+				continue
+			}
+			if !strings.Contains(line, chainName) {
+				continue
+			}
+			args := append([]string{"-t", "mangle", "-D", "POSTROUTING"}, fields[2:]...)
+			exec.Command("iptables", args...).Run()
+		}
+	}
 
 	// Flush and delete our chain.
 	exec.Command("iptables", "-t", "mangle", "-F", chainName).Run()
@@ -65,6 +78,22 @@ func removeIPTables() error {
 	exec.Command("iptables", "-t", "mangle", "-X", "IDSPOOF_WINEMU").Run()
 
 	return nil
+}
+
+// ScopeToOwner narrows the mangle chain to one user's traffic: the global
+// POSTROUTING jump is replaced with a uid-owner-scoped jump, so packets
+// from every other user pass through unmodified.
+func ScopeToOwner(owner string) error {
+	// Drop the global jump (may already be gone).
+	exec.Command("iptables", "-t", "mangle", "-D", "POSTROUTING", "-j", chainName).Run()
+	// Idempotent: the scoped jump may already be in place from a previous start.
+	if err := exec.Command("iptables", "-t", "mangle", "-C", "POSTROUTING",
+		"-m", "owner", "--uid-owner", owner, "-j", chainName).Err; err == nil {
+		return nil
+	}
+	// iptables resolves the user name to a UID at install time; a missing
+	// user is an error.
+	return run("iptables", "-t", "mangle", "-A", "POSTROUTING", "-m", "owner", "--uid-owner", owner, "-j", chainName)
 }
 
 // jumpExists checks if POSTROUTING already has a jump to our chain.

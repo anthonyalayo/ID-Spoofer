@@ -9,6 +9,7 @@ import (
 
 type linuxSpoofer struct {
 	stateDir string
+	noDaemon bool // don't start the rewriter daemon; leave the queue to an external process
 }
 
 // NewLinuxSpoofer returns the Linux network persona spoofer.
@@ -17,6 +18,11 @@ func NewLinuxSpoofer() Spoofer { return &linuxSpoofer{} }
 // SetStateDir implements StateDirAware: the NFQUEUE rewriter daemon is
 // tracked via a pid file in the state directory.
 func (s *linuxSpoofer) SetStateDir(dir string) { s.stateDir = dir }
+
+// SetNoDaemon implements RewriterSpawnControl: keep the NFQUEUE rule but
+// leave the queue to an external process (e.g. a service manager) instead of
+// starting the detached helper.
+func (s *linuxSpoofer) SetNoDaemon(v bool) { s.noDaemon = v }
 
 // Current snapshots the active system state so we can restore later.
 func (s *linuxSpoofer) Current() (*Snapshot, error) {
@@ -50,6 +56,25 @@ func (s *linuxSpoofer) Apply(p Persona) error {
 	//    CLI process exiting.
 	if err := installNFQueueRule(); err != nil {
 		errs = append(errs, fmt.Sprintf("nfqueue rule: %v", err))
+	} else if s.noDaemon {
+		// The queue is expected to be drained by an external process
+		// (e.g. a service manager running `idspoof __rewriter`); check
+		// what, if anything, currently owns it.
+		pid, runningPersona, alive := RewriterStatus(s.stateDir)
+		switch {
+		case alive && PersonaType(runningPersona) == p.Type:
+			// An external rewriter for the matching persona already
+			// drains the queue — nothing to do.
+		case alive:
+			errs = append(errs, fmt.Sprintf(
+				"nfqueue rewriter: running rewriter (PID %d) uses persona %s, not %s; stop it (or its service) before applying with an external rewriter",
+				pid, runningPersona, p.Type))
+			removeNFQueueRule()
+		default:
+			errs = append(errs, fmt.Sprintf(
+				"nfqueue rewriter: not running; expected under an external manager, which starts its own rewriter (manual equivalent: `idspoof __rewriter --persona %s`)",
+				p.Type))
+		}
 	} else if _, err := SpawnRewriterDaemon(s.stateDir, p.Type); err != nil {
 		errs = append(errs, fmt.Sprintf("nfqueue rewriter: %v", err))
 		removeNFQueueRule()

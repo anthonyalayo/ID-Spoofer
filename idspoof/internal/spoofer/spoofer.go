@@ -88,10 +88,14 @@ func (o *Orchestrator) applyMAC(dry, quiet bool) Result {
 		ui.Progress("Discovering network interfaces...", 10)
 	}
 
-	// Save originals to state before changing.
-	origState := mac.InterfacesToStateString(ifaces)
-	if err := o.state.Set("ORIG_MACS", origState); err != nil {
-		o.logger.Warn("could not persist original MACs", "err", err)
+	// Save originals to state before changing — but only on the first
+	// apply. Re-baselining after a rotation would record the rotated
+	// live values as originals and make every later restore a no-op.
+	if _, exists := o.state.Get("ORIG_MACS"); !exists {
+		origState := mac.InterfacesToStateString(ifaces)
+		if err := o.state.Set("ORIG_MACS", origState); err != nil {
+			o.logger.Warn("could not persist original MACs", "err", err)
+		}
 	}
 
 	if dry {
@@ -110,6 +114,14 @@ func (o *Orchestrator) applyMAC(dry, quiet bool) Result {
 	if err != nil {
 		o.logger.Error("MAC spoofing failed", "err", err)
 		return Result{Operation: OpMAC, Err: err}
+	}
+
+	// Record the interfaces that now carry spoofed MACs so status can
+	// mark a live MAC as spoofed only when it matches a value we set.
+	if len(changed) > 0 {
+		if err := o.state.Set("SPOOFED_MACS", mac.InterfacesToStateString(changed)); err != nil {
+			o.logger.Warn("could not persist spoofed MACs", "err", err)
+		}
 	}
 
 	if !quiet {
@@ -138,6 +150,7 @@ func (o *Orchestrator) restoreMAC(quiet bool) Result {
 	if err := ms.Restore(ifaces); err != nil {
 		return Result{Operation: OpMAC, Err: err}
 	}
+	o.state.Delete("SPOOFED_MACS") // live MACs are original again
 	if !quiet {
 		ui.Progress("MAC addresses restored", 100)
 	}
@@ -153,6 +166,13 @@ func (o *Orchestrator) applyNetIdent(opts Options) Result {
 	// in the state directory — tell it where that is.
 	if sd, ok := ns.(netident.StateDirAware); ok {
 		sd.SetStateDir(o.state.Dir())
+	}
+
+	// A caller that runs the rewriter under an external process manager
+	// (a systemd service) keeps the NFQUEUE rule but skips spawning the
+	// detached helper.
+	if rsc, ok := ns.(netident.RewriterSpawnControl); ok {
+		rsc.SetNoDaemon(opts.NoDaemon)
 	}
 
 	// Snapshot current state for rollback.
@@ -406,5 +426,5 @@ func (o *Orchestrator) stateGet(key, fallback string) string {
 	return fallback
 }
 
-func itoa(v int) string      { return strconv.Itoa(v) }
-func atoi(s string) int      { v, _ := strconv.Atoi(s); return v }
+func itoa(v int) string { return strconv.Itoa(v) }
+func atoi(s string) int { v, _ := strconv.Atoi(s); return v }
