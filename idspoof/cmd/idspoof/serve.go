@@ -41,7 +41,7 @@ part is unavailable, but --mac and --sysinfo still work.`,
 
 var serveOpts struct {
 	persona  string
-	owner    string
+	owner    []string
 	mac      bool
 	netident bool
 	sysinfo  bool
@@ -50,7 +50,7 @@ var serveOpts struct {
 func init() {
 	f := serveCmd.Flags()
 	f.StringVar(&serveOpts.persona, "persona", "windows", "Network persona to project (windows, macos, ios, linux, android)")
-	f.StringVar(&serveOpts.owner, "owner", "", "Scope the mangle chain to one user's traffic (iptables -m owner --uid-owner); default: all users")
+	f.StringSliceVar(&serveOpts.owner, "owner", nil, "Scope the mangle chain to specific users' traffic (iptables -m owner --uid-owner); repeat the flag or comma-separate; default: all users")
 	f.BoolVar(&serveOpts.mac, "mac", false, "Spoof MAC addresses")
 	f.BoolVar(&serveOpts.netident, "netident", false, "Apply network persona (TCP/IP stack, DHCP, NFQUEUE)")
 	f.BoolVar(&serveOpts.sysinfo, "sysinfo", false, "Generate fake system hardware profile")
@@ -146,16 +146,16 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	printResults(applyResults)
 
-	// Optionally narrow the mangle chain to one user's traffic.
-	if serveOpts.owner != "" && runNetIdent {
-		if err := netident.ScopeToOwner(serveOpts.owner); err != nil {
+	// Optionally narrow the mangle chain to specific users' traffic.
+	if len(serveOpts.owner) > 0 && runNetIdent {
+		if err := netident.ScopeToOwners(serveOpts.owner); err != nil {
 			// The deferred unwind stops the engine and restores the stack.
-			return fmt.Errorf("scoping to owner %q: %w", serveOpts.owner, err)
+			return err
 		}
 		if !cfg.Quiet {
-			fmt.Printf("mangle chain scoped to user %q\n", serveOpts.owner)
+			fmt.Printf("mangle chain scoped to user(s): %s\n", strings.Join(serveOpts.owner, ", "))
 		}
-	} else if serveOpts.owner != "" {
+	} else if len(serveOpts.owner) > 0 {
 		if !cfg.Quiet {
 			fmt.Println("note: --owner scopes the mangle chain, which requires --netident")
 		}

@@ -110,24 +110,32 @@ func removeOwnerScopedJumps() {
 	}
 }
 
-// ScopeToOwner narrows the mangle chain to one user's traffic: the global
-// POSTROUTING jump is replaced with a uid-owner-scoped jump, so packets
-// from every other user pass through unmodified.
-func ScopeToOwner(owner string) error {
+// ScopeToOwners narrows the mangle chain to the listed users' traffic:
+// the global POSTROUTING jump is replaced with one uid-owner-scoped
+// jump per user, so packets from every other user pass through
+// unmodified.
+func ScopeToOwners(owners []string) error {
 	// Drop the global jump (may already be gone).
 	exec.Command("iptables", "-t", "mangle", "-D", "POSTROUTING", "-j", chainName).Run()
-	// Drop owner-scoped jumps a previous crashed session left behind:
-	// a restart under a different owner would otherwise keep rewriting
-	// the old owner's traffic too.
+	// Drop every owner-scoped jump a previous session left behind —
+	// including owners not in this list — so the scope is exactly the
+	// users given here.
 	removeOwnerScopedJumps()
-	// Idempotent: the scoped jump may already be in place from a previous start.
-	if err := exec.Command("iptables", "-t", "mangle", "-C", "POSTROUTING",
-		"-m", "owner", "--uid-owner", owner, "-j", chainName).Run(); err == nil {
-		return nil
+	// One jump per user, deduped: iptables allows duplicate identical
+	// rules, and a duplicate would double-queue that user's SYNs.
+	seen := make(map[string]struct{}, len(owners))
+	for _, owner := range owners {
+		if _, dup := seen[owner]; dup {
+			continue
+		}
+		seen[owner] = struct{}{}
+		// iptables resolves the user name to a UID at install time; a
+		// missing user is an error.
+		if err := run("iptables", "-t", "mangle", "-A", "POSTROUTING", "-m", "owner", "--uid-owner", owner, "-j", chainName); err != nil {
+			return fmt.Errorf("scoping to user %q: %w", owner, err)
+		}
 	}
-	// iptables resolves the user name to a UID at install time; a missing
-	// user is an error.
-	return run("iptables", "-t", "mangle", "-A", "POSTROUTING", "-m", "owner", "--uid-owner", owner, "-j", chainName)
+	return nil
 }
 
 // jumpExists checks if POSTROUTING already has a jump to our chain.

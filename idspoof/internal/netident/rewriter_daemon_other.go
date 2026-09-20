@@ -28,8 +28,8 @@ func RunRewriterDaemon(persona PersonaType, stateDir string, marker string) erro
 	return fmt.Errorf("NFQUEUE rewriter not supported on this platform")
 }
 
-// ScopeToOwner is unsupported outside Linux.
-func ScopeToOwner(owner string) error {
+// ScopeToOwners is unsupported outside Linux.
+func ScopeToOwners(owners []string) error {
 	return fmt.Errorf("mangle owner scoping not supported on this platform")
 }
 
